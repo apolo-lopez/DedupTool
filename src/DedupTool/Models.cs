@@ -36,4 +36,14 @@ public class LoadFileRow
     public string Hash { get; set; } = "";
 }
 
-public record DedupResult(List<LoadFileRow> Rows, int Suppressed);
+/// <summary>One validation warning: which document is invalid and why (design D5).</summary>
+public record ValidationWarning(string DocId, string Reason);
+
+/// <summary>
+/// One validation finding plus the input position of the document it belongs to,
+/// so callers can exclude exactly those documents (task 2.3). Issues are in
+/// input order, one per invalid document.
+/// </summary>
+public record ValidationIssue(int InputIndex, ValidationWarning Warning);
+
+public record DedupResult(List<LoadFileRow> Rows, int Suppressed, List<ValidationWarning> Warnings);

@@ -1,0 +1,80 @@
+# PROGRESS — DedupTool / INGEST-4471
+
+Micro-task tracker for the coding phase. One checkbox per task; mark `[x]` **only after the requirement has been reviewed, tested and approved** in the iteration. Keep the per-iteration memory in `ai/ITERATION_LOG.md` and the next-task prompt at the bottom of each entry.
+
+- **OpenSpec change:** `openspec/changes/fix-family-dedup-and-cross-mailbox/` (proposal · specs · design · tasks)
+- **Decision record:** `ai/QUESTIONS.md` · **Open questions:** `TECH_DEBT.md` · **Iteration memory:** `ai/ITERATION_LOG.md`
+- **Status legend:** `[ ]` not started · `[~]` in progress / awaiting review · `[x]` done & approved
+- **Run tests:** `dotnet test test/DedupTool.Tests/DedupTool.Tests.csproj` (root `dotnet test` broken — TECH_DEBT TD-3)
+
+**Phase:** step 3 — task-by-task implementation, one task per iteration. **Complete: all groups 1–9 done, 32/32 tasks approved.** Specs approved; group 9 (documentation) closed with task 9.5.
+
+---
+
+## 1. Test scaffolding (no product code)
+
+- [x] 1.1 Document factory helpers (email / attachment / loose builders) — verify: existing test compiles using them — *approved* (`test/DedupTool.Tests/TestDocuments.cs`, `DeduperTests.cs` refactored; `dotnet test` 3/3 ✓)
+- [x] 1.2 Repo-root path resolver — verify: smoke test opens `data/batch-sample.json` from the test binary — *approved* (`test/DedupTool.Tests/TestPaths.cs`, `TestPathsTests.cs`; `dotnet test` 4/4 ✓)
+- [x] 1.3 Deterministic shuffle helper (fixed seed) — verify: returns a true permutation — *approved* (`test/DedupTool.Tests/TestShuffle.cs`, `TestShuffleTests.cs`; `dotnet test` 7/7 ✓)
+
+## 2. Validation & family model
+
+- [x] 2.1 `docId` index + children map + memoized root resolution with cycle guard — verify: simple parent, nested chain → root email, loose self-root tests — *approved* (`src/DedupTool/FamilyIndex.cs`, `FamilyIndexTests.cs`; `dotnet test` 15/15 ✓)
+- [x] 2.2 Validation pass (unknown parent, empty sha256, empty/duplicate docId, bad/offset-less sentDate, cycles) → warnings — verify: one warning per invalid doc, valid batch → zero warnings — *approved* (`src/DedupTool/Validator.cs`, `Models.cs` +`Warnings`, `Deduper.cs` wired; `ValidatorTests.cs`; `dotnet test` 35/35 ✓; sample output byte-identical, no warnings)
+- [x] 2.3 Invalid docs + descendants excluded, not counted as suppressed — verify: no row references skipped ParentID, suppressed count unchanged by invalids — *approved* (`src/DedupTool/Deduper.cs` exclusion pass + `Validator.Analyze`, `Models.cs` +`ValidationIssue`, `ExclusionTests.cs` 8 tests; `dotnet test` 43/43 ✓; sample byte-identical 16/12/4, invalid-batch CLI smoke ✓)
+
+## 3. Class-scoped hash deduplication
+
+- [x] 3.1 Loose dedup by sha256 batch-wide, lowest-docId survivor — verify: same-hash two custodians → one row, distinct → both, shuffle-stable — *approved* (`src/DedupTool/Deduper.cs` `CollectLooseNonSurvivors`, 5 tests in `DeduperTests.cs`; `dotnet test` 48/48 ✓; sample byte-identical 16/12/4, no warnings)
+- [x] 3.2 Attachment dedup by sha256 **within same parent only** — verify: DOC-000003 vs DOC-000005 both kept (INGEST-4471 regression), same-parent dup → one row — *approved* (`src/DedupTool/Deduper.cs` `CollectAttachmentNonSurvivors` keyed `(parentId, sha256)`, 4 tests in `DeduperTests.cs`; `dotnet test` 52/52 ✓; sample now 16/15/1 by design — DOC-000005 in (INGEST-4471 fix), DOC-000010/11 back until 4.2, DOC-000013 still out)
+- [x] 3.3 Dedup classes disjoint (attachment hash == loose hash → both kept) — verify: test — *approved* (no production change — per-class dispatch from 3.1/3.2 is correct-by-construction; 4 tests in `DeduperTests.cs`; `dotnet test` 56/56 ✓; sample 16/15/1 identical to 3.2 output — no cross-class collisions)
+- [x] 3.4 Suppression propagates to descendants — verify: orphan test (no dangling ParentID) — *approved* (`src/DedupTool/Deduper.cs` `CollectDraggedDescendants` BFS with resolved-parent guard, `duplicates` set merge, 4 tests in `DeduperTests.cs`; `dotnet test` 60/60 ✓; sample 16/15/1 identical to 3.3 output — no same-parent dup groups to drag)
+
+## 4. Cross-mailbox email fingerprint (§3.3)
+
+- [x] 4.1 Fingerprint normalization (design D4, full normalization) — verify: all eight Q4 fixtures as table-driven tests, case-only diffs do NOT match — *approved* (new `src/DedupTool/EmailFingerprint.cs` record + `src/DedupTool/IsoDate.cs` D7 helper; `EmailFingerprintTests.cs`: 8-row theory + null-fingerprint guard; `dotnet test` 69/69 ✓; sample 16/15/1 unchanged — not wired into `Deduper` until 4.2)
+- [x] 4.2 Email grouping: lowest docId survives, losing family suppressed wholesale — verify: DOC-000001/000009 → family 9 fully out; distinct emails keep families — *approved* (`src/DedupTool/Deduper.cs` `CollectEmailNonSurvivors` — top-level emails only, key `EmailFingerprint`, lowest-docId survivor, unioned into the 3.4 `duplicates` seeds so the drag BFS pulls whole subtrees; legacy `seen` set deleted; 4 tests in `DeduperTests.cs`; `dotnet test` 73/73 ✓; sample **16 in / 12 out / 4 suppressed** — the expected final row set: DOC-000005 in, DOC-000009/10/11 (family wholesale) + DOC-000013 out)
+- [x] 4.3 Attached emails excluded from fingerprint grouping — verify: test — *approved* (no production change — 4.2's `ParentId is null` gate already excludes them, and empty-string parent is caught as unknown-parent by validation; 3 tests in `DeduperTests.cs` [different-family match, standalone pair still dedups with attached copies, two attached emails with equal fingerprints]; `dotnet test` 76/76 ✓; sample 16/12/4 **byte-identical to 4.2** — sample has no parented emails)
+- [x] 4.4 Determinism at Deduper level — verify: shuffled runs → identical rows, FamilyID/SentDate, suppressed counts — *approved* (no production change — grouping is min-docId and the 3.4 drag is reachability-based, both order-free; new `test/DedupTool.Tests/DeterminismTests.cs` with 2 tests: sample batch over seeds 1/2/424242 and a 12-doc mixed batch over seeds 7/11/99/12345, comparing docId-sorted all-8-field projections + suppressed counts, with premise and "deterministically wrong" guards; `dotnet test` 78/78 ✓; sample 16/12/4 byte-identical; shuffled-CLI probe → same 12-row set, identical per-DocID values, row order differs until 6.3)
+
+## 5. Row projection: FamilyID & SentDate
+
+- [x] 5.1 FamilyID = family root for every row — verify: nested chain, simple attachment, loose self tests — *approved* (`src/DedupTool/Deduper.cs` emit loop uses `index.ResolveRoot(d).DocId`; SentDate left on the immediate parent for 5.3; new `test/DedupTool.Tests/RowProjectionTests.cs` 4 tests incl. nested chain + shuffle stability; `dotnet test` 82/82 ✓; sample 16/12/4 **byte-identical** — no nested chains in the sample; crafted nested CLI: grandchild DOC-3 now `FamilyID,DOC-1`)
+- [x] 5.2 SentDate exactly `YYYY-MM-DDTHH:MM:SSZ` (convert / passthrough / truncate / offset-less rejected) — verify: four tests incl. `-05:00 → 19:22:00Z` — *approved* (`src/DedupTool/Deduper.cs` projects the source timestamp through `IsoDate.FormatUtc` (4.1 helper) — offsets converted, `Z` passthrough, fraction truncated, loose empty; 5 tests in `RowProjectionTests.cs` incl. midnight rollover and offset-less → no row + warning; `dotnet test` 87/87 ✓; sample 16/12/4 with **exactly 6 rows changed** (the `-05:00` ones) → `19:22:00Z` / `14:10:00Z` / `16:45:00Z`; all else byte-identical)
+- [x] 5.3 Children carry root email date; loose empty — verify: attachment, nested child (non-empty — current bug), loose tests — *approved* (`src/DedupTool/Deduper.cs` resolves the root once and takes both FamilyID **and** SentDate from it; immediate-parent `Find` branch deleted; 4 tests in `RowProjectionTests.cs` [nested chain all rows root date, direct child, loose empty, top-level own date]; `dotnet test` 91/91 ✓; sample **byte-identical to 5.2** — direct children only; nested CLI probe: DOC-3 now `2024-03-05T19:22:00Z` instead of empty)
+
+## 6. Load file writer
+
+- [x] 6.1 `EscapeField` RFC 4180 — verify: comma/quote/LF quoting tests + ordinary field unchanged — *approved* (`src/DedupTool/LoadFileWriter.cs` public `EscapeField` — verbatim unless value holds `"`/`,`/CR/LF, then quoted with quotes doubled; not yet wired into `ToCsv` (6.2); new `LoadFileWriterTests.cs` 8 cases [6-case theory + quote&comma combo + no-quote-added guard]; `dotnet test` 99/99 ✓; sample 16/12/4 **byte-identical to 5.3**)
+- [x] 6.2 Escaping on all fields, exact header, LF endings — verify: byte-exact header test + LF test — *approved* (`LoadFileWriter.ToCsv` escapes all eight fields via `EscapeField`, header still literal from `Header` + LF; 4 tests in `LoadFileWriterTests.cs` [header byte-exact, comma filename, all-eight-fields, LF-only]; `dotnet test` 103/103 ✓; sample 16/12/4 **byte-identical to 6.1**; crafted quoting batch → raw `"Quarterly ""final"", v2.eml"` and Python `csv` round-trip returns the original filenames, LF-only)
+- [x] 6.3 Rows sorted by DocID ordinal — verify: reversed input → byte-identical output — *approved* (`LoadFileWriter.ToCsv` iterates `OrderBy(DocId, StringComparer.Ordinal)` — ordinal (`DOC-10` before `DOC-9`), stable for equal ids; 3 tests in `LoadFileWriterTests.cs` [reversed list byte-identical, ordinal pin, 5-row × 3-shuffle byte-identical]; `dotnet test` 106/106 ✓; sample byte-identical to 6.2; **externally shuffled sample → byte-identical CSV** — `diff` clean)
+
+## 7. CLI & reporting (input-handling)
+
+- [x] 7.1 Warnings on stderr, exit 0 (`InternalsVisibleTo` for `Main`) — verify: unknown-parent batch test — *approved* (`Program.cs` prints `warning: <docId>: <reason>` per warning to stderr before writing, exit unchanged; new `src/DedupTool/Properties/AssemblyInfo.cs` with `InternalsVisibleTo("DedupTool.Tests")`; new `CliTests.cs` 3 tests [unknown-parent → 2 ordered warnings + exit 0 + partial file, valid sample → empty stderr, empty docId → `(missing docId)`]; `dotnet test` 109/109 ✓; sample stderr 0 bytes, output byte-identical; crafted invalid batch → 3 warnings, 4 in/1 out/0 suppressed)
+- [x] 7.2 Malformed JSON → stderr error, non-zero exit, no load file — verify: test — *approved* (`Program.cs` narrow `try/catch` on the read+deserialize boundary (`IOException`/`UnauthorizedAccessException`/`JsonException` only) → one-line `error: cannot read batch "<path>": …`, exit 1, writer never reached; 4 `CliTests` [malformed, missing, empty, existing output untouched]; `dotnet test` 113/113 ✓; sample exit 0 / stderr 0 bytes / byte-identical; real CLI: 3 failure modes → exit 1, one line, no file)
+- [x] 7.3 Usage contract preserved (exit 2) — verify: test — *approved* (no production change — existing guard already emits the exact usage line; 3 new `CliTests` cases [theory over 0/1 args via `MemberData` (InlineData arrays fail CS0182), fact for 3 args incl. temp out path]; exit 2, stdout empty, stderr byte-exact, no file created; `dotnet test` 116/116 ✓; real CLI 0/1/3 args → exit 2 + exact line; sample unchanged)
+- [x] 7.4 Summary line exact — verify: `batch-sample: 16 documents in, 12 out, 4 suppressed as duplicates.` — *approved* (no production change — summary template already exact and the sample line was asserted in 7.1; 3 new `CliTests` [sample is exactly one stdout line, differing batch → `counts: 3 in, 2 out, 1 suppressed`, skipped batch → `3 in, 2 out, 0 suppressed` + warning]; `dotnet test` 119/119 ✓; sample 16/12/4, stderr 0 bytes, byte-identical to 7.3)
+
+## 8. End-to-end integration
+
+- [x] 8.1 Golden e2e on `data/batch-sample.json` — full expected CSV inline (12 rows, DOC-000005 in, DOC-000009/10/11/13 out, UTC dates) — *awaiting review* (new `GoldenE2ETests.cs` 2 tests: full inline golden CSV produced via real `Program.Main` + explicit per-requirement assertions [12 rows/4 suppressed, DOC-000005 with ParentID DOC-000004 and DOC-000003's hash, 009/10/11/13 absent, UTC regex, loose empty, ordinal order]; shared `TestPaths.LoadSampleBatch()` added and `DeterminismTests` refactored onto it; `dotnet test` 121/121 ✓; sample byte-identical; **vs launch baseline exactly 2 rows differ** (005 in, 009 out), totals 12/4 unchanged)
+- [x] 8.2 Order-independence e2e (shuffled batch → byte-identical CSV) — *approved* (2 new `GoldenE2ETests` [4 seeds through pipeline + writer → byte-identical golden CSV; seed-777 permutation serialized to JSON and run through real `Program.Main` → golden file]; premise guards for real reorder and same multiset; `dotnet test` 123/123 ✓; sample byte-identical to 8.1)
+- [x] 8.3 Full suite green incl. the 3 starter tests via the csproj command — *approved* (`dotnet test test/DedupTool.Tests/DedupTool.Tests.csproj` → **123/123**, run 5× consecutively; starter tests by name via filter → 3/3 (`IdenticalLooseDocuments_SecondIsSuppressed`, `DistinctDocuments_AllKept`, `LoadFile_StartsWithFixedHeader`); root `dotnet test` still fails exit 1 / MSB1003 (SDK 8.0.133 cannot read `DedupTool.slnx`) → TD-3 stands, recorded; **fixed a console-capture flake** introduced by 8.2 — new `ConsoleCollection` (`DisableParallelization = true`) with `CliTests` + `GoldenE2ETests` in it; only remaining warning is pre-existing `xUnit1026` in `EmailFingerprintTests`)
+
+## 9. Documentation deliverables
+
+- [x] 9.1 `DECISIONS.md` filled in (all sections, no template dashes) — *approved* (2,887 words, 0 bare-dash placeholders; 15 numbered decisions [Q1–Q7 + 8 implementation-time ones], plus what changed / didn't get to / next / porting contract [not reimplemented; contract enumerated] / AI retrospective with 6 concrete corrections; `dotnet test` 123/123 ✓; sample byte-identical to 8.2)
+- [x] 9.2 `TECH_DEBT.md` updated (TD-1 provisional-implemented; TD-2/TD-3 status) — *approved* (4 entries with question/why/provisional/evidence/closes-when; TD-1 marked **provisionally implemented** with shipped behavior + test evidence; TD-2 open with RFC 4180 round-trip note and the honest "sample proves nothing about escaping"; TD-3 open with exact `MSB1003` / SDK 8.0.133 vs `DedupTool.slnx`; **TD-4 added** (duplicate-`docId` order sensitivity) so DECISIONS decision 15 no longer dangles; cross-ref check: all referenced TD ids exist, 0 bare dashes; `dotnet test` 123/123 ✓; sample byte-identical to 9.1)
+- [x] 9.3 `ai/QUESTIONS.md` assumptions/statuses current — *approved* (status table mapping Q1–Q7 + A8 → implementing task → verifying test, with honest gaps for Q3 [no asymmetric-attachment fixture] and Q5 [ingest → TD-2]; **A8 added** (the assumption the specs already cited); new A9–A16 for coding-time assumptions [exit codes, warning format, literal `parentId`, writer sort, root projection, duplicate-`docId` → TD-4, skipped≠suppressed, content-only fingerprint inputs]; Q6 heading shows disposition; 2,000 words, 0 placeholders; `dotnet test` 123/123 ✓; sample byte-identical to 9.2)
+- [x] 9.4 `ai/ITERATION_LOG.md` entry appended with next-task prompt — *approved* (structural check: **32 entries, iterations 0–31 in order**, 32 verbatim next-task prompts, none missing; appended a **closing summary** — problem, shipped behavior, sample 16→12/4 with the two-row swap, 123 tests, file inventory, remaining TD items, uncommitted repo state; `dotnet test` 123/123 ✓; sample byte-identical to 9.3)
+- [x] 9.5 AI transcripts collected under `ai/` — *approved* (`ai/transcripts/`: 6 phase files [iterations 0–1, 2–7, 8–15, 16–21, 22–28, 29–34], `README.md` index with provenance rules, `generate_transcripts.py`); prompts verified **verbatim** against `ai/ITERATION_LOG.md` for all 35 iterations (0–34), generator idempotent (two runs → identical `sha256sum`), no placeholders; `dotnet test` 123/123 ✓; sample byte-identical to 9.4)
+
+---
+
+### Iteration status
+
+| # | Date | Scope | Result |
+|---|------|-------|--------|
+| 0 | 2026-11-06 | Code & spec review; 7 questions resolved; evidence run for Q4 | Done — records in `ai/QUESTIONS.md`, `TECH_DEBT.md` |
+| 1 | 2026-11-06 | OpenSpec change (proposal + 3 specs + design + 32 tasks) + this file | Awaiting approval (step 2) — no code changes yet |
